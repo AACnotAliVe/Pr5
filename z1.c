@@ -1,26 +1,44 @@
-#define _GNU_SOURCE  
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
 #include <time.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 
-#define ROUNDS 10  
+#define ROUNDS 10  // Количество раундов
 
-volatile sig_atomic_t guessed_number = 0;
-volatile sig_atomic_t guessed = 0;
-volatile pid_t opponent_pid = 0;
+volatile sig_atomic_t guessed = 0;         // Флаг: число угадано?
+volatile sig_atomic_t opponent_pid = 0;    // PID второго игрока
+volatile sig_atomic_t number_to_guess = 0; // Загаданное число
+volatile sig_atomic_t attempts = 0;        // Количество попыток
 
 void handle_guess(int sig, siginfo_t *info, void *context) {
     (void)sig;
     (void)context;
-    guessed_number = info->si_value.sival_int;
-    opponent_pid = info->si_pid;
+    int guess = info->si_value.sival_int;
+
+    printf("[Игрок 1] Получил число %d от Игрока 2\n", guess);
+    
+    if (guess == number_to_guess) {
+        guessed = 1;
+        kill(opponent_pid, SIGUSR1); // Сообщаем, что число угадано
+    } else {
+        kill(opponent_pid, SIGUSR2); // Сообщаем, что число не угадано
+    }
 }
 
 void handle_result(int sig) {
-    guessed = (sig == SIGUSR1);  
+    if (sig == SIGUSR1) {
+        guessed = 1;  // Число угадано
+    }
+}
+
+void wait_for_signal() {
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigsuspend(&mask);
 }
 
 void play_game(int max_number, int role) {
@@ -38,21 +56,18 @@ void play_game(int max_number, int role) {
     srand(time(NULL) ^ getpid());
 
     for (int round = 0; round < ROUNDS; round++) {
-        int target, attempts = 0;
+        attempts = 0;
+        if (role == 0) {  // Первый игрок загадывает число
+            number_to_guess = rand() % max_number + 1;
+            printf("[Игрок 1] Загадал число %d\n", number_to_guess);
+            kill(opponent_pid, SIGUSR2); // Даем сигнал начать угадывание
 
-        if (role == 0) {
-            target = rand() % max_number + 1;
-            printf("[Игрок 1] Загадал число %d\n", target);
-            kill(opponent_pid, SIGUSR2);
-
-            while (!guessed) pause();
+            while (!guessed) wait_for_signal();  // Ждем, пока число будет угадано
             printf("[Игрок 1] Число угадано за %d попыток!\n", attempts);
             guessed = 0;
-            role = 1;
-            kill(opponent_pid, SIGUSR2);
-        } else {
+            role = 1;  // Меняем роли
+        } else {  // Второй игрок угадывает число
             guessed = 0;
-            attempts = 0;
             while (!guessed) {
                 int guess = rand() % max_number + 1;
                 printf("[Игрок 2] Пробую %d\n", guess);
@@ -62,14 +77,15 @@ void play_game(int max_number, int role) {
                 value.sival_int = guess;
                 sigqueue(opponent_pid, SIGRTMIN, value);
 
-                pause();
+                wait_for_signal();  // Ждем ответ
             }
-            printf("[Игрок 2] Угадал за %d попыток!\n", attempts);
+            printf("[Игрок 2] Угадал число за %d попыток!\n", attempts);
             guessed = 0;
-            role = 0;
-            kill(opponent_pid, SIGUSR2);
+            role = 0;  // Меняем роли
         }
     }
+
+    printf("[Процесс %d] Завершаю игру...\n", getpid());
 }
 
 int main(int argc, char *argv[]) {
@@ -88,16 +104,17 @@ int main(int argc, char *argv[]) {
     if (pid == -1) {
         perror("fork");
         exit(EXIT_FAILURE);
-    } else if (pid == 0) {
+    } else if (pid == 0) {  // Дочерний процесс (игрок 2)
         opponent_pid = getppid();
         play_game(max_number, 1);
         exit(0);
-    } else {
+    } else {  // Родительский процесс (игрок 1)
         opponent_pid = pid;
         play_game(max_number, 0);
         
         int status;
-        waitpid(pid, &status, 0);  // Ждем завершения дочернего процесса
+        waitpid(pid, &status, 0);  // Дожидаемся завершения второго процесса
+        printf("Оба процесса завершены. Выход в консоль.\n");
     }
 
     return 0;
