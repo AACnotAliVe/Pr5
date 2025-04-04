@@ -7,7 +7,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
-#define ROUNDS 10  // Количество раундов
+#define ROUNDS 10
 
 volatile sig_atomic_t guessed = 0;         // Флаг: число угадано?
 volatile sig_atomic_t opponent_pid = 0;    // PID второго игрока
@@ -25,13 +25,13 @@ void handle_guess(int sig, siginfo_t *info, void *context) {
         guessed = 1;
         kill(opponent_pid, SIGUSR1); // Сообщаем, что число угадано
     } else {
-        kill(opponent_pid, SIGUSR2); // Сообщаем, что число не угадано
+        kill(opponent_pid, SIGUSR2);
     }
 }
 
 void handle_result(int sig) {
     if (sig == SIGUSR1) {
-        guessed = 1;  // Число угадано
+        guessed = 1;
     }
 }
 
@@ -57,16 +57,16 @@ void play_game(int max_number, int role) {
 
     for (int round = 0; round < ROUNDS; round++) {
         attempts = 0;
-        if (role == 0) {  // Первый игрок загадывает число
+        if (role == 0) {
             number_to_guess = rand() % max_number + 1;
             printf("[Игрок 1] Загадал число %d\n", number_to_guess);
-            kill(opponent_pid, SIGUSR2); // Даем сигнал начать угадывание
+            kill(opponent_pid, SIGUSR2);
 
-            while (!guessed) wait_for_signal();  // Ждем, пока число будет угадано
+            while (!guessed) wait_for_signal();
             printf("[Игрок 1] Число угадано за %d попыток!\n", attempts);
             guessed = 0;
-            role = 1;  // Меняем роли
-        } else {  // Второй игрок угадывает число
+            role = 1;
+        } else {
             guessed = 0;
             while (!guessed) {
                 int guess = rand() % max_number + 1;
@@ -77,11 +77,11 @@ void play_game(int max_number, int role) {
                 value.sival_int = guess;
                 sigqueue(opponent_pid, SIGRTMIN, value);
 
-                wait_for_signal();  // Ждем ответ
+                wait_for_signal();
             }
             printf("[Игрок 2] Угадал число за %d попыток!\n", attempts);
             guessed = 0;
-            role = 0;  // Меняем роли
+            role = 0;
         }
     }
 
@@ -104,16 +104,16 @@ int main(int argc, char *argv[]) {
     if (pid == -1) {
         perror("fork");
         exit(EXIT_FAILURE);
-    } else if (pid == 0) {  // Дочерний процесс (игрок 2)
+    } else if (pid == 0) {
         opponent_pid = getppid();
         play_game(max_number, 1);
         exit(0);
-    } else {  // Родительский процесс (игрок 1)
+    } else {
         opponent_pid = pid;
         play_game(max_number, 0);
         
         int status;
-        waitpid(pid, &status, 0);  // Дожидаемся завершения второго процесса
+        waitpid(pid, &status, 0);
         printf("Оба процесса завершены. Выход в консоль.\n");
     }
 
