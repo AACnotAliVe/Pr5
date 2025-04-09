@@ -4,118 +4,132 @@
 #include <unistd.h>
 #include <signal.h>
 #include <time.h>
-#include <sys/types.h>
+#include <string.h>
 #include <sys/wait.h>
 
-#define ROUNDS 10
+#define GAME_ROUNDS 10
 
-volatile sig_atomic_t guessed = 0;         // Флаг: число угадано?
-volatile sig_atomic_t opponent_pid = 0;    // PID второго игрока
-volatile sig_atomic_t number_to_guess = 0; // Загаданное число
-volatile sig_atomic_t attempts = 0;        // Количество попыток
+volatile sig_atomic_t signal_received = 0;
+volatile sig_atomic_t last_received_number = 0;
+volatile sig_atomic_t guess_was_correct = 0;
 
-void handle_guess(int sig, siginfo_t *info, void *context) {
-    (void)sig;
-    (void)context;
-    int guess = info->si_value.sival_int;
-
-    printf("[Игрок 1] Получил число %d от Игрока 2\n", guess);
-    
-    if (guess == number_to_guess) {
-        guessed = 1;
-        kill(opponent_pid, SIGUSR1); // Сообщаем, что число угадано
-    } else {
-        kill(opponent_pid, SIGUSR2);
+void on_guess_received(int sig, siginfo_t *info, void *ctx) {
+    if (sig == SIGRTMIN) {
+        last_received_number = info->si_value.sival_int;
+        signal_received = 1;
     }
 }
 
-void handle_result(int sig) {
-    if (sig == SIGUSR1) {
-        guessed = 1;
-    }
+void on_result_signal(int sig) {
+    guess_was_correct = (sig == SIGUSR1) ? 1 : 0;
 }
 
-void wait_for_signal() {
-    sigset_t mask;
-    sigemptyset(&mask);
-    sigsuspend(&mask);
-}
-
-void play_game(int max_number, int role) {
-    struct sigaction sa_guess, sa_result;
-    
-    sa_guess.sa_flags = SA_SIGINFO;
-    sa_guess.sa_sigaction = handle_guess;
-    sigaction(SIGRTMIN, &sa_guess, NULL);
-    
-    sa_result.sa_flags = 0;
-    sa_result.sa_handler = handle_result;
-    sigaction(SIGUSR1, &sa_result, NULL);
-    sigaction(SIGUSR2, &sa_result, NULL);
-
+void start_sender(pid_t guesser_pid, int max_value, int round_number) {
     srand(time(NULL) ^ getpid());
+    int secret_number = 1 + rand() % max_value;
+    printf("🔒 [Раунд %d] Игрок 1 загадал число: %d\n", round_number, secret_number);
+    fflush(stdout);
+    struct sigaction sa = {0};
+    sa.sa_flags = SA_SIGINFO;
+    sa.sa_sigaction = on_guess_received;
+    sigaction(SIGRTMIN, &sa, NULL);
 
-    for (int round = 0; round < ROUNDS; round++) {
-        attempts = 0;
-        if (role == 0) {
-            number_to_guess = rand() % max_number + 1;
-            printf("[Игрок 1] Загадал число %d\n", number_to_guess);
-            kill(opponent_pid, SIGUSR2);
+    sigset_t wait_mask;
+    sigemptyset(&wait_mask);
+    sigaddset(&wait_mask, SIGRTMIN);
+    sigprocmask(SIG_BLOCK, &wait_mask, NULL);
 
-            while (!guessed) wait_for_signal();
-            printf("[Игрок 1] Число угадано за %d попыток!\n", attempts);
-            guessed = 0;
-            role = 1;
+    int attempts = 0;
+
+    while (1) {
+        signal_received = 0;
+
+        siginfo_t info;
+        sigwaitinfo(&wait_mask, &info);
+
+        int guess = info.si_value.sival_int;
+        attempts++;
+        printf("Игрок 1 получил число: %d\n", guess);
+        fflush(stdout);
+
+        if (guess == secret_number) {
+            kill(guesser_pid, SIGUSR1);
+            break;
         } else {
-            guessed = 0;
-            while (!guessed) {
-                int guess = rand() % max_number + 1;
-                printf("[Игрок 2] Пробую %d\n", guess);
-                attempts++;
-
-                union sigval value;
-                value.sival_int = guess;
-                sigqueue(opponent_pid, SIGRTMIN, value);
-
-                wait_for_signal();
-            }
-            printf("[Игрок 2] Угадал число за %d попыток!\n", attempts);
-            guessed = 0;
-            role = 0;
+            kill(guesser_pid, SIGUSR2);
         }
     }
 
-    printf("[Процесс %d] Завершаю игру...\n", getpid());
+    printf("Игрок 1: число отгадано за %d попыток.\n\n", attempts);
+}
+
+void start_guesser(pid_t sender_pid, int max_value) {
+    struct sigaction sa = {0};
+    sa.sa_handler = on_result_signal;
+    sigaction(SIGUSR1, &sa, NULL);
+    sigaction(SIGUSR2, &sa, NULL);
+
+    sigset_t wait_mask;
+    sigemptyset(&wait_mask);
+    sigaddset(&wait_mask, SIGUSR1);
+    sigaddset(&wait_mask, SIGUSR2);
+    sigprocmask(SIG_BLOCK, &wait_mask, NULL);
+
+    for (int round = 1; round <= GAME_ROUNDS; ++round) {
+        int attempts = 0;
+
+        do {
+            int guess = 1 + rand() % max_value;
+            printf("Игрок 2 пробует: %d\n", guess);
+            fflush(stdout);
+
+            union sigval value;
+            value.sival_int = guess;
+            sigqueue(sender_pid, SIGRTMIN, value);
+
+            int sig;
+            sigwait(&wait_mask, &sig);
+            attempts++;
+        } while (!guess_was_correct);
+
+        printf("Игрок 2: число угадано за %d попыток!\n\n", attempts);
+        guess_was_correct = 0;
+        sleep(1);
+    }
 }
 
 int main(int argc, char *argv[]) {
     if (argc != 2) {
-        printf("Использование: %s <N>\n", argv[0]);
-        exit(EXIT_FAILURE);
+        fprintf(stderr, "Использование: %s <максимальное число>\n", argv[0]);
+        return EXIT_FAILURE;
     }
 
-    int max_number = atoi(argv[1]);
-    if (max_number <= 0) {
-        printf("Число N должно быть больше 0!\n");
-        exit(EXIT_FAILURE);
+    int max_value = atoi(argv[1]);
+    if (max_value < 1) {
+        fprintf(stderr, "Число должно быть больше 0.\n");
+        return EXIT_FAILURE;
     }
 
-    pid_t pid = fork();
-    if (pid == -1) {
-        perror("fork");
-        exit(EXIT_FAILURE);
-    } else if (pid == 0) {
-        opponent_pid = getppid();
-        play_game(max_number, 1);
-        exit(0);
+    pid_t child_pid = fork();
+
+    if (child_pid < 0) {
+        perror("Ошибка fork");
+        return EXIT_FAILURE;
+    }
+
+    if (child_pid == 0) {
+        srand(time(NULL) ^ getpid());
+        start_guesser(getppid(), max_value);
+        exit(EXIT_SUCCESS);
     } else {
-        opponent_pid = pid;
-        play_game(max_number, 0);
-        
-        int status;
-        waitpid(pid, &status, 0);
-        printf("Оба процесса завершены. Выход в консоль.\n");
+        for (int round = 1; round <= GAME_ROUNDS; ++round) {
+            start_sender(child_pid, max_value, round);
+        }
+
+        kill(child_pid, SIGTERM);
+        wait(NULL);
+        printf("Игра завершена. Процессы завершились корректно.\n");
     }
 
-    return 0;
+    return EXIT_SUCCESS;
 }
